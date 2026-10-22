@@ -29,7 +29,7 @@ function yamlParse(raw) {
   return s;
 }
 
-const FIELD_ORDER = ['id', 'name', 'active', 'phase', 'muscles', 'volume', 'difficulty', 'sets', 'unit',
+const FIELD_ORDER = ['id', 'name', 'active', 'phase', 'order', 'muscles', 'volume', 'difficulty', 'sets', 'unit',
   'current_reps', 'current_time', 'current_weight', 'current_level',
   'goal_reps', 'goal_time', 'goal_weight', 'goal_level', 'levels', 'example', 'created'];
 
@@ -41,6 +41,7 @@ export function exToMd(ex) {
     goal_reps: ex.goal.reps, goal_time: ex.goal.time, goal_weight: ex.goal.weight, goal_level: ex.goal.level,
     levels: ex.levels || [],
   };
+  if (typeof ex.order === 'number' && isFinite(ex.order)) fm.order = ex.order;
   if (ex.example) fm.example = true;
   if (ex.createdAt) fm.created = new Date(ex.createdAt).toISOString();
   const lines = ['---'];
@@ -78,6 +79,7 @@ export function mdToEx(text) {
     name,
     active: fm.active === true,
     phase: typeof fm.phase === 'string' ? fm.phase : 'strength',
+    order: typeof fm.order === 'number' ? fm.order : null,
     muscles: list(fm.muscles).map((x) => x.toLowerCase()),
     volume: fm.volume === 'time' ? 'time' : 'reps',
     difficulty: ['weight', 'progression', 'none'].includes(fm.difficulty) ? fm.difficulty : 'none',

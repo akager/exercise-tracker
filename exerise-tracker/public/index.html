@@ -131,6 +131,12 @@ h1, h2, h3 { margin: 0; text-wrap: balance; }
 .list > .region-head + .xrow { border-top: 0; }
 .list > .phase-head:first-child { border-radius: var(--radius) var(--radius) 0 0; }
 
+.grip { flex: none; width: 34px; height: 44px; margin-left: -6px; display: grid; place-items: center; border: 0; background: none; color: var(--muted); touch-action: none; cursor: grab; border-radius: 8px; }
+.grip svg { width: 18px; height: 18px; }
+.grip:active { cursor: grabbing; }
+.xrow.dragging { position: relative; z-index: 5; background: var(--surface); box-shadow: 0 6px 20px rgba(0,0,0,.18); border-radius: 10px; }
+.xrow.shifting { transition: transform .15s ease; }
+.reorder-hint { font-size: 13px; color: var(--muted); margin: 0; }
 .switch { position: relative; width: 46px; height: 28px; flex: none; }
 .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
 .switch span { position: absolute; inset: 0; background: var(--surface-2); border: 1px solid var(--line); border-radius: 99px; transition: background .15s; }
@@ -354,6 +360,7 @@ const ICON = {
   more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
   close: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
   up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>',
+  grip: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="9" cy="6" r="1.6"/><circle cx="15" cy="6" r="1.6"/><circle cx="9" cy="12" r="1.6"/><circle cx="15" cy="12" r="1.6"/><circle cx="9" cy="18" r="1.6"/><circle cx="15" cy="18" r="1.6"/></svg>',
   down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
 };
 
@@ -638,8 +645,12 @@ function goalMet(ex) {
   if (ex.difficulty === 'weight') return (+c.weight || 0) >= (+g.weight || 0) && cv >= gv && gv > 0;
   return gv > 0 && cv >= gv;
 }
+const ordOf = (e) => (typeof e.order === 'number' ? e.order : 1e9);
+const regionSort = (e) => (e.phase === 'strength' ? REGION_ORDER.indexOf(primaryRegion(e)) : 0);
+const gkeyOf = (e) => e.phase + (e.phase === 'strength' ? ':' + primaryRegion(e) : '');
 function sortEx(list) {
-  return list.sort((a, b) => phaseIdx(a.phase) - phaseIdx(b.phase) || REGION_ORDER.indexOf(primaryRegion(a)) - REGION_ORDER.indexOf(primaryRegion(b)) || primaryGroup(a) - primaryGroup(b) || (a.name || '').localeCompare(b.name || ''));
+  return list.sort((a, b) => phaseIdx(a.phase) - phaseIdx(b.phase) || regionSort(a) - regionSort(b) || ordOf(a) - ordOf(b)
+    || primaryGroup(a) - primaryGroup(b) || (a.name || '').localeCompare(b.name || ''));
 }
 const allEx = () => Object.values(S.exercises);
 const activeEx = () => sortEx(allEx().filter((e) => e.active));
@@ -853,7 +864,7 @@ function viewIdle() {
   h += '<p class="sub">' + (act.length ? plural(act.length, 'active exercise') : 'No active exercises yet') + (last ? ' · last workout ' + esc(DAY.format(new Date(last.startedAt))) : '') + '</p>';
   h += '<button class="btn primary big" data-act="start"' + (act.length ? '' : ' disabled') + '>Start workout</button></section>';
   if (!act.length) h += '<div class="panel empty"><p>Your rotation is the set of exercises a workout pulls from. Add an exercise, or switch on one you already have.</p><button class="btn primary" data-act="new-ex">New exercise</button></div>';
-  else h += '<section class="stack"><div class="row-between"><h2 class="h2">Rotation <span class="count">' + act.length + '</span></h2><button class="linkish" data-act="view" data-v="exercises">Swap exercises</button></div><div class="panel list">' + groupedRows(act, false) + '</div></section>';
+  else h += '<section class="stack"><div class="row-between"><h2 class="h2">Rotation <span class="count">' + act.length + '</span></h2><span style="display:flex;gap:16px">' + (S.reorder ? '' : '<button class="linkish" data-act="view" data-v="exercises">Swap exercises</button>') + '<button class="linkish" data-act="reorder">' + (S.reorder ? 'Done' : 'Reorder') + '</button></span></div>' + (S.reorder ? '<p class="reorder-hint">Drag the handles to set the order your workout follows.</p>' : '') + '<div class="panel list">' + groupedRows(act, false, S.reorder) + '</div></section>';
   h += '<section class="stack"><h2 class="h2">Recent workouts <span class="count">' + past.length + '</span></h2>';
   h += past.length ? '<div class="panel list">' + past.slice(0, 20).map(histRow).join('') + '</div>' : '<div class="panel empty"><p>Finished workouts show up here with everything you logged.</p></div>';
   return h + '</section>';
@@ -869,20 +880,25 @@ function histRow(s) {
   }
   return h + '</div>';
 }
-function groupedRows(list, withToggle) {
+// Warm-up and cooldown are one sequence each; strength is split by upper / lower / core.
+function groupedRows(list, withToggle, reorder) {
   let h = '', ph = null, rg = null;
   list.forEach((ex) => {
-    const r = primaryRegion(ex);
     if (ex.phase !== ph) { ph = ex.phase; rg = null; h += '<div class="phase-head" data-head="phase"><span class="phase-dot ph-' + esc(ex.phase) + '"></span>' + esc(phaseLabel(ex.phase)) + '</div>'; }
-    if (r !== rg) { rg = r; h += '<div class="region-head" data-head="region">' + esc(regionLabel(r)) + '</div>'; }
-    h += exRow(ex, withToggle);
+    if (ex.phase === 'strength') { const r = primaryRegion(ex); if (r !== rg) { rg = r; h += '<div class="region-head" data-head="region">' + esc(regionLabel(r)) + '</div>'; } }
+    h += exRow(ex, withToggle, reorder);
   });
   return h;
 }
 function searchKey(ex) { return (ex.name + ' ' + (ex.muscles || []).join(' ') + ' ' + phaseLabel(ex.phase)).toLowerCase(); }
-function exRow(ex, withToggle) {
+function exRow(ex, withToggle, reorder) {
   const p = Math.max(0, Math.min(1, progress(ex))); const met = goalMet(ex);
-  let h = '<div class="xrow" data-search="' + esc(searchKey(ex)) + '"><button class="xrow-main" data-act="edit" data-id="' + esc(ex.id) + '">';
+  let h = '<div class="xrow" data-search="' + esc(searchKey(ex)) + '" data-id="' + esc(ex.id) + '" data-gkey="' + esc(gkeyOf(ex)) + '">';
+  if (reorder) {
+    h += '<button class="grip" data-grip aria-label="Move ' + esc(ex.name) + '. Drag, or use the up and down arrow keys">' + ICON.grip + '</button>';
+    return h + '<div class="xrow-main"><span class="xrow-name">' + esc(ex.name || 'Untitled') + '</span><span class="meta">' + esc(rx(ex)) + '</span></div></div>';
+  }
+  h += '<button class="xrow-main" data-act="edit" data-id="' + esc(ex.id) + '">';
   h += '<span class="xrow-name">' + esc(ex.name || 'Untitled') + (met ? '<span class="tag goal">Goal hit</span>' : '') + (ex.example ? '<span class="tag ex">Example</span>' : '') + '</span>';
   h += '<span class="rx">' + esc(rx(ex)) + '</span>';
   h += '<span class="meta">Goal ' + esc(goalText(ex)) + (ex.muscles.length ? ' · ' + esc(ex.muscles.join(', ')) : '') + '</span>';
@@ -1005,10 +1021,14 @@ function viewExercises() {
     else h += '<div class="banner"><span>Examples are loaded so you can try the flow.</span><button class="btn small" data-act="ask" data-v="clear-ex">Remove examples</button></div>';
   }
   if (!all.length) return h + '<div class="panel empty"><p>No exercises yet. Add the first one: give it a name, a goal and where it sits in your workout.</p><button class="btn primary" data-act="new-ex">New exercise</button></div>';
+  if (S.reorder) {
+    h += '<section class="stack"><div class="row-between"><h2 class="h2">In rotation <span class="count">' + act.length + '</span></h2><button class="btn small primary" data-act="reorder">Done</button></div><p class="reorder-hint">Drag the handles to set the order your workout follows. Warm-ups and cooldowns are one sequence each; strength is ordered within upper, lower and core.</p>';
+    return h + (act.length ? '<div class="panel list">' + groupedRows(act, false, true) + '</div>' : '<div class="panel empty"><p>Nothing in rotation.</p></div>') + '</section>';
+  }
   h += '<section class="stack"><input class="search" id="ex-search" type="search" placeholder="Search by name or muscle" value="' + esc(S.search) + '" aria-label="Search exercises">';
   h += '<div class="filters"><span class="lab">Phase</span><button class="tog" data-act="pf" data-v="all" aria-pressed="' + (f === 'all') + '">All</button>' + PHASES.map(([k, l]) => '<button class="tog" data-act="pf" data-v="' + k + '" aria-pressed="' + (f === k) + '">' + esc(l) + '</button>').join('') + '</div>';
   h += muscleFilterUI() + '</section>';
-  h += '<section class="stack"><h2 class="h2">In rotation <span class="count">' + act.length + '</span></h2>';
+  h += '<section class="stack"><div class="row-between"><h2 class="h2">In rotation <span class="count">' + act.length + '</span></h2>' + (act.length > 1 ? '<button class="linkish" data-act="reorder">Reorder</button>' : '') + '</div>';
   h += act.length ? '<div class="panel list">' + groupedRows(act, true) + '</div>' : '<div class="panel empty"><p>Nothing in rotation' + (filtered ? ' matches these filters' : '') + '.</p></div>';
   h += '</section><section class="stack"><h2 class="h2">Benched <span class="count">' + bench.length + '</span></h2>';
   h += bench.length ? '<div class="panel list">' + groupedRows(bench, true) + '</div>' : '<div class="panel empty"><p>' + (filtered ? 'No benched exercises match these filters.' : 'Retired exercises wait here with their history until you switch them back on.') + '</p></div>';
@@ -1211,6 +1231,78 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 function tickElapsed() { document.querySelectorAll('[data-elapsed]').forEach((el) => { const m = Math.max(0, Math.floor((Date.now() - +el.dataset.elapsed) / 60000)); el.textContent = m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; }); }
 setInterval(tickElapsed, 30000);
 
+/* ---------- drag to reorder ---------- */
+let drag = null;
+function groupRows(row) { return [...row.parentElement.querySelectorAll('.xrow[data-gkey="' + CSS.escape(row.dataset.gkey) + '"]')]; }
+function commitOrder(ids) {
+  ids.forEach((id, i) => { const e = S.exercises[id]; const o = (i + 1) * 10; if (e && e.order !== o) { e.order = o; Store.saveExercise(clone(e)); } });
+}
+function dragMove() {
+  if (!drag) return;
+  const pageY = drag.clientY + window.scrollY;
+  const { rects, from } = drag, n = rects.length;
+  const dy = Math.max(rects[0].top - rects[from].top, Math.min(rects[n - 1].bottom - rects[from].bottom, pageY - drag.y0));
+  drag.row.style.transform = 'translateY(' + dy + 'px)';
+  const center = rects[from].top + rects[from].height / 2 + (pageY - drag.y0); // unclamped, so dragging past either end picks the end slot
+  let to = from;
+  for (let i = 0; i < from; i++) if (center < rects[i].top + rects[i].height / 2) { to = i; break; }
+  if (to === from) for (let i = n - 1; i > from; i--) if (center > rects[i].top + rects[i].height / 2) { to = i; break; }
+  drag.to = to;
+  const hgt = rects[from].height;
+  drag.sibs.forEach((r, i) => {
+    if (i === from) return;
+    const shift = from < to && i > from && i <= to ? -hgt : to < from && i >= to && i < from ? hgt : 0;
+    r.style.transform = shift ? 'translateY(' + shift + 'px)' : '';
+  });
+}
+function autoScroll() {
+  if (!drag) return;
+  if (!drag.moved) { drag.raf = requestAnimationFrame(autoScroll); return; }
+  const edge = 70, y = drag.clientY, vh = window.innerHeight;
+  const v = y < edge ? -Math.ceil((edge - y) / 6) : y > vh - edge - 64 ? Math.ceil((y - (vh - edge - 64)) / 6) : 0;
+  if (v) { window.scrollBy(0, v); dragMove(); }
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+function endDrag(commit) {
+  if (!drag) return;
+  cancelAnimationFrame(drag.raf);
+  const { sibs, from, to } = drag;
+  sibs.forEach((r) => { r.style.transform = ''; r.classList.remove('dragging', 'shifting'); });
+  drag = null;
+  if (commit && to !== from) {
+    const ids = sibs.map((r) => r.dataset.id);
+    const [moved] = ids.splice(from, 1); ids.splice(to, 0, moved);
+    commitOrder(ids);
+  }
+  render();
+}
+document.addEventListener('pointerdown', (ev) => {
+  const g = ev.target.closest('[data-grip]'); if (!g || drag) return;
+  ev.preventDefault();
+  const row = g.closest('.xrow'), sibs = groupRows(row);
+  if (sibs.length < 2) return;
+  try { g.setPointerCapture(ev.pointerId); } catch (e) {}
+  const rects = sibs.map((r) => { const b = r.getBoundingClientRect(); return { top: b.top + window.scrollY, bottom: b.bottom + window.scrollY, height: b.height }; });
+  drag = { pid: ev.pointerId, row, sibs, rects, from: sibs.indexOf(row), to: sibs.indexOf(row), y0: ev.clientY + window.scrollY, clientY: ev.clientY };
+  row.classList.add('dragging');
+  sibs.forEach((r) => { if (r !== row) r.classList.add('shifting'); });
+  drag.raf = requestAnimationFrame(autoScroll);
+});
+document.addEventListener('pointermove', (ev) => { if (drag && ev.pointerId === drag.pid) { if (Math.abs(ev.clientY + window.scrollY - drag.y0) > 6) drag.moved = true; drag.clientY = ev.clientY; dragMove(); } });
+document.addEventListener('pointerup', (ev) => { if (drag && ev.pointerId === drag.pid) endDrag(true); });
+document.addEventListener('pointercancel', (ev) => { if (drag && ev.pointerId === drag.pid) endDrag(false); });
+document.addEventListener('keydown', (ev) => {
+  const g = ev.target.closest && ev.target.closest('[data-grip]');
+  if (!g || (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown')) return;
+  ev.preventDefault();
+  const row = g.closest('.xrow'), sibs = groupRows(row), ids = sibs.map((r) => r.dataset.id);
+  const from = ids.indexOf(row.dataset.id), to = from + (ev.key === 'ArrowUp' ? -1 : 1);
+  if (to < 0 || to >= ids.length) return;
+  ids.splice(from, 1); ids.splice(to, 0, row.dataset.id);
+  commitOrder(ids); render();
+  const again = document.querySelector('.xrow[data-id="' + CSS.escape(row.dataset.id) + '"] [data-grip]'); if (again) again.focus();
+});
+
 // toolbar buttons keep focus in the textarea
 document.addEventListener('pointerdown', (ev) => { if (ev.target.closest('.md-tools button')) ev.preventDefault(); });
 // Re-render after a blur only if nothing else re-rendered meanwhile, so a tap on a button isn't swallowed.
@@ -1240,7 +1332,7 @@ document.addEventListener('click', (ev) => {
   const exL = it ? (ex || normEx({ id: it.exId, name: it.name, cur: it.prev })) : null;
 
   switch (act) {
-    case 'view': S.view = t.dataset.v; S.confirm = null; S.search = ''; try { localStorage.setItem('rl-view', S.view); } catch (e) {} render(); window.scrollTo(0, 0); return;
+    case 'view': S.view = t.dataset.v; S.confirm = null; S.search = ''; S.reorder = false; try { localStorage.setItem('rl-view', S.view); } catch (e) {} render(); window.scrollTo(0, 0); return;
     case 'start': {
       const list = activeEx(); if (!list.length) return;
       const sess = { id: uid(), startedAt: Date.now(), finishedAt: null, status: 'active', items: list.map(makeItem) };
@@ -1299,6 +1391,10 @@ document.addEventListener('click', (ev) => {
     }
     case 'ask': S.confirm = t.dataset.v; render(); return;
     case 'reload': location.reload(); return;
+    case 'reorder':
+      S.reorder = !S.reorder;
+      if (S.reorder) { S.phaseFilter = 'all'; S.fRegion = 'all'; S.fGroup = null; S.fMuscle = null; S.search = ''; }
+      render(); return;
     case 'sync-retry':
       if (sync.error === 'auth' || sync.error === 'unreachable') { location.reload(); return; }
       sync.error = null; if (outbox.length) flush(false); else refresh(); renderSync(); return;
